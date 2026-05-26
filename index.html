@@ -745,4 +745,367 @@ const STORAGE_KEY = 'maisperformance-psw-v2';
 const DEBUG = new URLSearchParams(location.search).has('debug');
 
 let state = {
-  participantId: 
+  participantId: '',
+  participantDate: '',
+  answers: {},
+  startedAt: null,
+  completedAt: null
+};
+let saveTimeout = null;
+
+// ============== STORAGE ==============
+function loadState() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) return;
+    const data = JSON.parse(saved);
+    if (data.completedAt) {
+      // já completou — começa do zero
+      state = { participantId: '', participantDate: '', answers: {}, startedAt: null, completedAt: null };
+      return;
+    }
+    if (Object.keys(data.answers || {}).length > 0) {
+      state = data;
+      document.getElementById('screen-intro').classList.remove('active');
+      document.getElementById('screen-questions').classList.add('active');
+      renderQuestions();
+    }
+  } catch (e) { /* storage indisponível ou primeira vez */ }
+}
+
+function saveState() {
+  if (saveTimeout) clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      showSaveStatus('salvo');
+    } catch (e) {
+      showSaveStatus('erro ao salvar', true);
+    }
+  }, 500);
+}
+
+function showSaveStatus(msg, isError) {
+  const el = document.getElementById('save-status');
+  if (!el) return;
+  el.textContent = '· ' + msg;
+  el.style.color = isError ? '#c44' : '#8a9bb0';
+  setTimeout(() => { el.textContent = ''; }, 1500);
+}
+
+// ============== FLUXO ==============
+function startAssessment() {
+  state.participantId = document.getElementById('participant-id').value.trim();
+  state.participantDate = document.getElementById('participant-date').value;
+  state.startedAt = new Date().toISOString();
+  saveState();
+  document.getElementById('screen-intro').classList.remove('active');
+  document.getElementById('screen-questions').classList.add('active');
+  renderQuestions();
+  window.scrollTo(0, 0);
+}
+
+function renderQuestions() {
+  const container = document.getElementById('items');
+  container.innerHTML = '';
+  QUESTIONS.forEach((q, idx) => {
+    const ans = state.answers[q.id];
+    const card = document.createElement('div');
+    card.className = 'card' + (ans ? ' answered' : '');
+    card.innerHTML = `
+      <div class="item-counter">Pergunta ${idx + 1} de ${QUESTIONS.length}</div>
+      <div class="pair">
+        <div class="pair-left">${q.left}</div>
+        <div class="pair-right">${q.right}</div>
+      </div>
+      <div class="scale">
+        ${[1,2,3,4].map(v => `
+          <button class="scale-btn ${ans === v ? 'selected' : ''}" data-q="${q.id}" data-v="${v}">${v}</button>
+        `).join('')}
+      </div>
+      <div class="scale-labels">
+        <span>mais à esquerda</span>
+        <span>mais à direita</span>
+      </div>
+    `;
+    container.appendChild(card);
+  });
+  // bind buttons
+  container.querySelectorAll('.scale-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      setAnswer(parseInt(btn.dataset.q), parseInt(btn.dataset.v));
+    });
+  });
+  updateProgress();
+  if (DEBUG) renderDevPanel();
+}
+
+function setAnswer(qid, value) {
+  state.answers[qid] = value;
+  saveState();
+  const idx = QUESTIONS.findIndex(q => q.id === qid);
+  const cards = document.querySelectorAll('#items .card');
+  const card = cards[idx];
+  if (card) {
+    card.classList.add('answered');
+    card.querySelectorAll('.scale-btn').forEach(btn => {
+      if (parseInt(btn.dataset.v) === value) btn.classList.add('selected');
+      else btn.classList.remove('selected');
+    });
+  }
+  updateProgress();
+}
+
+function updateProgress() {
+  const total = QUESTIONS.length;
+  const count = Object.keys(state.answers).length;
+  document.getElementById('count').textContent = count;
+  document.getElementById('progress-fill').style.width = (count/total * 100) + '%';
+  const btn = document.getElementById('submit-btn');
+  if (count === total) {
+    btn.disabled = false;
+    btn.textContent = 'Ver resultado';
+  } else {
+    btn.disabled = true;
+    const falt = total - count;
+    btn.textContent = `Faltam ${falt} ${falt === 1 ? 'par' : 'pares'}`;
+  }
+}
+
+function submitAssessment() {
+  state.completedAt = new Date().toISOString();
+  saveState();
+  document.getElementById('screen-questions').classList.remove('active');
+  document.getElementById('screen-result').classList.add('active');
+  renderResult();
+  window.scrollTo(0, 0);
+}
+
+// ============== CÁLCULO ==============
+function compute() {
+  let sumWhite = 0, sumGray = 0;
+  for (const q of QUESTIONS) {
+    const s = state.answers[q.id] || 0;
+    if (q.axis === 'white') sumWhite += s;
+    else sumGray += s;
+  }
+  return { sumWhite, sumGray, perfil: profileFromSums(sumWhite, sumGray) };
+}
+
+function profileFromSums(sumWhite, sumGray) {
+  const whiteHigh = sumWhite > 36;
+  const grayHigh  = sumGray  > 36;
+  if (!whiteHigh && !grayHigh) return 'Diplomático';
+  if (!whiteHigh && grayHigh)  return 'Analítico';
+  if (whiteHigh && grayHigh)   return 'Pragmático';
+  return 'Expressivo'; // whiteHigh && !grayHigh
+}
+
+// ============== RENDER RESULT ==============
+function renderResult() {
+  const r = compute();
+  const d = DESCRIPTIONS[r.perfil];
+
+  document.getElementById('profile-name').textContent = r.perfil;
+  document.getElementById('result-meta').innerHTML = `
+    <span class="score-badge">Linhas Brancas: ${r.sumWhite}</span>
+    <span class="score-badge">Linhas Cinzas: ${r.sumGray}</span>
+  `;
+
+  document.getElementById('profile-caracteristicas').innerHTML =
+    d.caracteristicas.map(i => `<li>${i}</li>`).join('');
+  document.getElementById('profile-motivadores').innerHTML =
+    d.motivadores.map(i => `<li>${i}</li>`).join('');
+  document.getElementById('profile-transparecer').innerHTML =
+    d.transparecer.map(i => `<li>${i}</li>`).join('');
+
+  if (DEBUG) renderDevTests();
+}
+
+function printResult() {
+  // window.print() precisa ser chamado de forma síncrona dentro do
+  // handler de clique pra contar como gesto do usuário (Chrome e outros)
+  window.print();
+}
+
+// ============== EXPORT ==============
+function showExport() {
+  const r = compute();
+  const pid = state.participantId || 'anônimo';
+  const pdate = state.participantDate || (state.completedAt ? new Date(state.completedAt).toISOString().slice(0,10) : '—');
+
+  let txt = `MAIS PERFORMANCE\n`;
+  txt += `PSW — Assessment de Perfis Comportamentais\n`;
+  txt += `─────────────────────────────\n`;
+  txt += `Participante: ${pid}\n`;
+  txt += `Data:         ${pdate}\n`;
+  if (state.startedAt) txt += `Iniciado:     ${new Date(state.startedAt).toLocaleString('pt-BR')}\n`;
+  if (state.completedAt) txt += `Finalizado:   ${new Date(state.completedAt).toLocaleString('pt-BR')}\n`;
+  if (state.startedAt && state.completedAt) {
+    const dur = new Date(state.completedAt) - new Date(state.startedAt);
+    const min = Math.floor(dur / 60000);
+    const seg = Math.floor((dur % 60000) / 1000);
+    txt += `Duração:      ${min}m ${seg}s\n`;
+  }
+  txt += `─────────────────────────────\n\n`;
+
+  txt += `PERFIL: ${r.perfil}\n`;
+  txt += `Linhas Brancas: ${r.sumWhite}\n`;
+  txt += `Linhas Cinzas:  ${r.sumGray}\n\n`;
+
+  const d = DESCRIPTIONS[r.perfil];
+  txt += `CARACTERÍSTICAS\n`;
+  d.caracteristicas.forEach(i => txt += `- ${i}\n`);
+  txt += `\nFATORES QUE MOTIVAM\n`;
+  d.motivadores.forEach(i => txt += `- ${i}\n`);
+  txt += `\nPODE TRANSPARECER\n`;
+  d.transparecer.forEach(i => txt += `- ${i}\n`);
+
+  txt += `\n─────────────────────────────\n`;
+  txt += `RESPOSTAS POR PAR\n`;
+  QUESTIONS.forEach(q => {
+    const ans = state.answers[q.id] || '-';
+    txt += `${String(q.id).padStart(2,'0')} [${q.axis === 'white' ? 'B' : 'C'}] ${q.left.padEnd(28)} ↔ ${q.right.padEnd(28)} : ${ans}\n`;
+  });
+
+  txt += `\n─────────────────────────────\n`;
+  txt += `@oficial.maisperformance\n`;
+
+  document.getElementById('result-text').value = txt;
+  document.getElementById('export-result').classList.add('show');
+  setTimeout(() => {
+    document.getElementById('export-result').scrollIntoView({ behavior: 'smooth' });
+  }, 100);
+}
+
+async function copyResult() {
+  const text = document.getElementById('result-text').value;
+  const btn = document.getElementById('copy-btn');
+  const ta = document.getElementById('result-text');
+  let success = false;
+
+  // Tentativa 1: Clipboard API moderna (precisa de HTTPS ou localhost)
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      success = true;
+    } catch (e) { /* segue pro fallback */ }
+  }
+
+  // Tentativa 2: execCommand (deprecated mas funciona em file:// e em browsers antigos)
+  if (!success) {
+    try {
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      success = document.execCommand('copy');
+    } catch (e) { /* nada feito */ }
+  }
+
+  if (success) {
+    btn.textContent = '✓ Copiado!';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = 'Copiar resultado';
+      btn.classList.remove('copied');
+    }, 2000);
+  } else {
+    // Último recurso: seleciona o texto pra facilitar Ctrl+C / Cmd+C manual
+    ta.focus();
+    ta.select();
+    btn.textContent = 'Texto selecionado — use Ctrl+C';
+    setTimeout(() => { btn.textContent = 'Copiar resultado'; }, 3500);
+  }
+}
+
+function restartAssessment() {
+  if (!confirm('Apagar respostas e recomeçar?')) return;
+  state = { participantId: '', participantDate: '', answers: {}, startedAt: null, completedAt: null };
+  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+  document.getElementById('screen-result').classList.remove('active');
+  document.getElementById('export-result').classList.remove('show');
+  document.getElementById('screen-questions').classList.remove('active');
+  document.getElementById('screen-intro').classList.add('active');
+  document.getElementById('participant-id').value = '';
+  window.scrollTo(0, 0);
+}
+
+// ============== DEV PANEL (?debug=1) ==============
+function fillScenario(profile) {
+  // Define respostas que produzem o perfil indicado
+  const scenarios = {
+    'Diplomático': { white: 1, gray: 1 }, // sumWhite=15, sumGray=15 (ambos ≤ 36)
+    'Analítico':   { white: 1, gray: 4 }, // sumWhite=15, sumGray=60 (gray > 36)
+    'Pragmático':  { white: 4, gray: 4 }, // sumWhite=60, sumGray=60 (ambos > 36)
+    'Expressivo':  { white: 4, gray: 1 }  // sumWhite=60, sumGray=15 (white > 36)
+  };
+  const s = scenarios[profile];
+  QUESTIONS.forEach(q => {
+    state.answers[q.id] = q.axis === 'white' ? s.white : s.gray;
+  });
+  saveState();
+  renderQuestions();
+}
+
+function renderDevPanel() {
+  const panel = document.getElementById('dev-panel-questions');
+  panel.style.display = 'block';
+  panel.innerHTML = `
+    <div class="dev-panel">
+      <h4>🔧 Modo Debug — Preenchimento Automático</h4>
+      <div class="dev-btns">
+        <button class="dev-btn" onclick="fillScenario('Diplomático')">Diplomático</button>
+        <button class="dev-btn" onclick="fillScenario('Analítico')">Analítico</button>
+        <button class="dev-btn" onclick="fillScenario('Pragmático')">Pragmático</button>
+        <button class="dev-btn" onclick="fillScenario('Expressivo')">Expressivo</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderDevTests() {
+  const TESTS = [
+    { name: "Planilha 21/22",         w: 21, g: 22, expect: "Diplomático" },
+    { name: "Analítico claro",         w: 21, g: 37, expect: "Analítico" },
+    { name: "Pragmático claro",        w: 37, g: 37, expect: "Pragmático" },
+    { name: "Expressivo claro",        w: 37, g: 21, expect: "Expressivo" },
+    { name: "Borda 36/36 (não-alto)",  w: 36, g: 36, expect: "Diplomático" },
+    { name: "Borda 36/37",             w: 36, g: 37, expect: "Analítico" },
+    { name: "Borda 37/36",             w: 37, g: 36, expect: "Expressivo" },
+    { name: "Extremo 30/15",           w: 30, g: 15, expect: "Diplomático" },
+    { name: "Extremo 30/60",           w: 30, g: 60, expect: "Analítico" },
+    { name: "Extremo 60/60",           w: 60, g: 60, expect: "Pragmático" },
+    { name: "Extremo 60/15",           w: 60, g: 15, expect: "Expressivo" }
+  ];
+  const results = TESTS.map(t => {
+    const got = profileFromSums(t.w, t.g);
+    return { ...t, got, ok: got === t.expect };
+  });
+  const allOk = results.every(r => r.ok);
+  const panel = document.getElementById('dev-panel-result');
+  panel.style.display = 'block';
+  panel.innerHTML = `
+    <div class="dev-panel">
+      <h4>🔧 Auto-testes da regra de perfil ${allOk ? '✅' : '⚠️'}</h4>
+      <ul class="dev-tests">
+        ${results.map(r => `
+          <li class="${r.ok ? 'ok' : 'fail'}">
+            ${r.ok ? '✓' : '✗'} ${r.name} — w=${r.w}, g=${r.g} → esperado ${r.expect}, obtido ${r.got}
+          </li>
+        `).join('')}
+      </ul>
+    </div>
+  `;
+}
+
+// ============== INIT ==============
+(function init() {
+  // default date
+  const dateInput = document.getElementById('participant-date');
+  if (dateInput && !dateInput.value) dateInput.value = new Date().toISOString().slice(0,10);
+  loadState();
+})();
+</script>
+
+</body>
+</html>
